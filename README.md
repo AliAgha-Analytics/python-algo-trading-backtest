@@ -349,9 +349,10 @@ python-algo-trading-backtest/
 │   ├── optimize.py       # parameter grid + walk-forward optimisation
 │   └── plots.py          # static PNG charts + interactive Plotly chart
 ├── results/              # charts and CSV outputs (used in this README)
+├── requirements.txt
 ├── run_backtest.py       # backtest + cost scenarios + Monte Carlo
-├── run_optimization.py   # sensitivity grid + walk-forward (~1 minute)
-└── requirements.txt
+└── run_optimization.py   # sensitivity grid + walk-forward (~1 minute)
+ 
 ```
 
 ```bash
@@ -377,27 +378,8 @@ The first run downloads ~710k five-minute candles from Binance's public API, whi
 
 ---
 
-## 10. Changes from v1
+## 10. Next steps
 
-| Area | v1 | v2 (this version) |
-|---|---|---|
-| Execution | Daily bars, worst-case intrabar ordering | **5-minute bars** for every fill |
-| Fees | Flat 0.10% per side | **Maker/taker by order type** (0.075%, VIP 0 + BNB) |
-| Slippage | None | **1 bp + 10% of the fill bar's range** on market/stop orders |
-| Financing | None | **Margin interest** on borrowed BTC (shorts) and USDT (leverage > 1×) |
-| Leverage | Uncapped | **3× cross-margin cap** |
-| Risk per cycle | 3% | **2%** (from the Monte Carlo ruin analysis) |
-| Parameters | Single fixed set | **384-set sensitivity grid + walk-forward optimisation + ensemble** |
-| Code | Single script | **Modular package** |
-| Bug fixes | — | Stops are now checked on the bar of a reverse re-entry. The trailing stop updates at the new bar's open, as in the MT5 EA (v1 lagged by one bar). Indicators get 120 days of warm-up history |
-
----
-
-## 11. Next steps
-
-- [x] Monte Carlo resampling of the trade sequence (drawdown distribution, risk of ruin)
-- [x] Realistic fees, slippage and margin interest with intraday execution
-- [x] Parameter sensitivity grid and walk-forward optimisation
 - [ ] **Regime filter** (e.g. ADX or 200-day MA) to avoid whipsaw reverse exits in ranging markets
 - [ ] **Block bootstrap** Monte Carlo to capture loss clustering
 - [ ] **Order-book-based slippage** using historical depth snapshots
