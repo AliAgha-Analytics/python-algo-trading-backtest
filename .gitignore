@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Downloaded market data
+data_cache/
+
+# Generated outputs (the README chart is kept)
+*.html
+events_*.csv
+cycles_*.csv
