@@ -211,8 +211,8 @@ This is the profile of a **diversifier or crisis-alpha sleeve**, not a replaceme
 ## 7. How to run
 
 ```bash
-git clone https://github.com/AliAgha-Analytics/python-kijun-volume-backtest.git
-cd python-kijun-volume-backtest
+git clone https://github.com/AliAgha-Analytics/python-algo-trading-backtest.git
+cd python-algo-trading-backtest
 pip install -r requirements.txt
 python kijun_volume_backtest.py
 ```
