@@ -255,9 +255,8 @@ This is the profile of a **diversifier or crisis-alpha sleeve**, not a replaceme
 
 ## 7. Limitations
 
-- **Daily bars only.** The intra-bar order of high and low is unknown, so the engine assumes the worst case (stop before target). That may understate performance slightly.
-- **No slippage or funding modelled** beyond the taker fee. Spot BTC/USDT is very liquid, but perpetual futures would add funding rate costs.
-- **Shorting spot** assumes borrow is available at no cost. Realistically, the short side would run on perpetual futures.
+- **No slippage or funding modelled**  Spot BTC/USDT is very liquid, but perpetual futures would add funding rate costs and Margin trading would add borrowing rate fees.
+- **Shorting spot** assumes borrow is available at no cost. Realistically, the short side would run on perpetual futures OR margin trading feature on spot.
 - **Single parameter set**, no optimisation. That avoids overfitting, but the parameters are not proven optimal either.
 - **Monte Carlo assumes independent trades.** Regime-driven loss clustering means the true drawdown tail is likely fatter than simulated.
 - **Survivorship.** Tested on large-cap, surviving assets only.
