@@ -292,7 +292,6 @@ All parameters are in the `CONFIG` block at the top of the script: symbol, timef
 
 - [ ] **Regime filter**: only take longs above the 200-day MA and shorts below it, or skip trades when ADX < 20, to cut whipsaw reverse exits.
 - [ ] **Walk-forward optimisation** of Kijun, ATR and volume parameters with out-of-sample validation.
-- [x] **Monte Carlo resampling** of the trade sequence to estimate the distribution of drawdowns and the risk of ruin.
 - [ ] **Block bootstrap** Monte Carlo that resamples runs of consecutive trades, to capture regime-driven loss clustering.
 - [ ] **Maker-fee execution** and slippage modelling on intraday data.
 - [ ] **Perpetual futures version** including funding rates.
