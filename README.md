@@ -1,30 +1,35 @@
-# Kijun-sen + Normalized Volume Strategy Backtest (Crypto)
+# Algorithmic Trading Backtest: Kijun-sen + Normalized Volume (Crypto)
 
-An event-driven Python backtest of a **split-position trend-following strategy** on Binance BTC/USDT daily data.
-The strategy uses the Ichimoku **Kijun-sen** as the trend baseline and **Normalized Volume** as confirmation.
+An event-driven Python backtesting framework for a **split-position trend-following strategy** on Binance BTC/USDT. It covers:
 
-It is a Python port of a MetaTrader 5 Expert Advisor I built. The rules, position management and edge cases match the EA one-to-one. I then added crypto exchange fees, risk-based sizing, a full KPI report and a **Monte Carlo risk analysis** (drawdown distribution and risk of ruin) on top.
+- **Realistic execution:** maker/taker fees, slippage and spot-margin borrowing costs, with every fill simulated on **5-minute bars**.
+- **Risk analysis:** Monte Carlo drawdown and risk-of-ruin analysis.
+- **Parameter robustness:** a 384-combination sensitivity grid and **walk-forward optimisation**.
 
-![Backtest results](results_BTCUSDT_1d.png)
+The strategy uses the Ichimoku **Kijun-sen** as the trend baseline and **Normalized Volume** as confirmation. It is a Python port of a MetaTrader 5 Expert Advisor I built.
+
+![Backtest results](results/results.png)
 
 ---
 
 ## Table of contents
 1. [Strategy logic](#1-strategy-logic)
 2. [Position sizing and trade management](#2-position-sizing-and-trade-management)
-3. [Backtest engine and assumptions](#3-backtest-engine-and-assumptions)
+3. [Execution and cost model](#3-execution-and-cost-model)
 4. [Results](#4-results)
 5. [Monte Carlo risk analysis](#5-monte-carlo-risk-analysis)
-6. [Interpretation](#6-interpretation)
-7. [Limitations](#7-limitations)
-8. [How to run](#8-how-to-run)
-9. [Next steps](#9-next-steps)
+6. [Parameter robustness and walk-forward optimisation](#6-parameter-robustness-and-walk-forward-optimisation)
+7. [Interpretation](#7-interpretation)
+8. [Limitations](#8-limitations)
+9. [Project structure and how to run](#9-project-structure-and-how-to-run)
+10. [Changes from v1](#10-changes-from-v1)
+11. [Next steps](#11-next-steps)
 
 ---
 
 ## 1. Strategy logic
 
-### Indicators
+### Indicators (daily bars)
 
 | Indicator | Formula | Role |
 |---|---|---|
@@ -38,9 +43,9 @@ It is a Python port of a MetaTrader 5 Expert Advisor I built. The rules, positio
 |---|---|---|
 | **Cross (primary)** | Price closes across the Kijun-sen, the candle closes in the direction of the cross, and volume is green | Direction of the cross |
 | **Volume refresh (secondary)** | No fresh cross, but Normalized Volume turns from red to green while price stays on one side of the Kijun | Side of the Kijun price is on |
-| **Reverse re-entry** | An open cycle is closed by a reverse signal, and that same bar also qualifies as a primary entry in the opposite direction | Opposite to the closed cycle |
+| **Reverse re-entry** | A reverse signal closes the open cycle, and the same bar also qualifies as a primary entry in the opposite direction | Opposite to the closed cycle |
 
-All signals use the **last closed bar** and are executed at the **next bar's open**, so there is no look-ahead.
+Signals use the **last closed daily bar** and are executed from the **next day's open**, so there is no look-ahead.
 
 ---
 
@@ -52,252 +57,353 @@ Each signal opens a **cycle** made of **two equal legs**:
 |---|---|---|
 | Stop-loss | 1.5 × ATR | 1.5 × ATR |
 | Take-profit | 1.0 × ATR | None |
-| Trailing stop | No | 1.5 × ATR from the previous close, updated once per bar, only moves in the trade's favour |
+| Trailing stop | No | 1.5 × ATR from the previous close, updated at each new daily bar, only moves in the trade's favour |
 | After leg 1's TP | Closed | Stop moves to **breakeven** |
 
-**Sizing.** Each cycle risks **3% of current equity** in total across both legs, measured at the initial stop distance. Equity compounds.
-
-**Linked exits:**
-- If leg 2 is stopped out while leg 1 is still open, leg 1 is **force-closed** at the same price. A cycle always resolves as one event.
-- If price closes on the **opposite side of the Kijun-sen**, both legs are closed at the next open (a reverse signal).
-
-The point of this design is to take a quick, high-probability profit on half the position and lock in a risk-free trade. The other half is left to capture an extended trend.
+- **Risk:** each cycle risks **2% of current equity** in total across both legs, measured at the initial stop. The Monte Carlo analysis in section 5 shows why 2% was chosen over 3%.
+- **Linked exits:** if leg 2 is stopped out while leg 1 is still open, leg 1 is force-closed at the same moment. A **reverse signal** (a close on the other side of the Kijun-sen) closes both legs at the next open.
+- **Leverage cap:** total position notional is capped at **3× equity**, Binance's cross-margin limit. In practice the largest position in the backtest was 0.72× equity.
 
 ---
 
-## 3. Backtest engine and assumptions
+## 3. Execution and cost model
 
-| Item | Setting |
-|---|---|
-| Market | Binance spot **BTC/USDT**, daily candles |
-| Period | **1 Jan 2020 → 3 Oct 2026** (6.75 years, 2,468 bars) |
-| Starting capital | 100,000 USDT |
-| Fees | **0.10% per side** (Binance taker), charged on every leg's entry and exit |
-| Data | Binance public REST API, cached locally as CSV |
+Signals come from daily bars, but **every order is simulated on 5-minute bars** (710,318 bars, 100% coverage of the trading days). This also removes the classic daily-bar problem of not knowing whether the stop or the target was hit first within the day.
 
-Fill model (conservative by design):
-- Signals are decided on the bar's close and executed at the next bar's open.
-- Within a bar, the **adverse extreme is assumed to happen before the favourable one**. Stops are checked before take-profits.
-- If price **gaps through** a stop or target, the fill is the bar's open, not the level.
-- The engine is **event-driven** (bar-by-bar loop), not vectorised. This is needed to model the two legs, the trailing stop and the linked exits correctly.
+### Order types
+
+| Order | Order type | Fee | Slippage | Fill logic |
+|---|---|---|---|---|
+| **Entry** | Limit at the daily open | Maker | None | Filled only if price **trades through** the limit within 60 minutes. Otherwise it is replaced by a market order (taker + slippage) |
+| **Leg 1 take-profit** | Resting limit | Maker | None | Filled only if price trades **through** the level. A gap fills at the better open price |
+| **Initial / trailing / breakeven stop** | Stop-market | Taker | Yes | First 5-minute bar touching the stop. A gap fills at that bar's open, then slippage is applied |
+| **Reverse exit** | Market at the open | Taker | Yes | First 5-minute bar of the day |
+
+### Costs (Binance spot margin account, regular user)
+
+| Cost | Assumption | Source / rationale |
+|---|---|---|
+| Maker / taker fee | **0.075% / 0.075%** | VIP 0 is 0.10% / 0.10%. Paying fees in BNB gives a 25% discount |
+| Slippage (market and stop orders) | **1 bp + 10% of the fill bar's high-low range** | Grows automatically in fast markets, where stops get hit |
+| BTC borrow interest (shorts) | **0.012% per day (~4.4% a year)**, on the full short position | Typical published Binance margin rate. Charged per started hour |
+| USDT borrow interest (longs) | **0.030% per day (~11% a year)**, only on notional above equity | Never triggered: longs were always fully funded by equity |
+
+Within a single 5-minute bar, a stop is still assumed to fill before a target. That is conservative, but with 288 bars a day it rarely matters.
 
 ---
 
 ## 4. Results
 
-### 4.1 Headline KPIs: strategy vs. buy & hold (2020 → Oct 2026)
+**BTC/USDT · 1 Jan 2020 → 3 Oct 2026 (6.76 years) · 100,000 USDT start · 2% risk per cycle · all costs included**
+
+### 4.1 Headline KPIs vs. buy & hold
 
 | KPI | Strategy | Buy & Hold BTC |
 |---|---:|---:|
-| Final equity | **142,455** | 1,176,990 |
-| Total return | **+42.5%** | +1,077.0% |
-| CAGR | **+5.4%** | +44.1% |
-| Max drawdown | **−36.9%** | −76.6% |
-| Sharpe ratio (annualised, rf = 0) | **0.39** | 0.91 |
-| Sortino ratio | **0.53** | n/a |
-| Calmar ratio (CAGR / Max DD) | **0.15** | 0.58 |
-| Recovery factor (Net profit / Max DD $) | **0.73** | n/a |
-| Time in market | **72.8%** | 100% |
+| Final equity | **137,158** | 1,176,990 |
+| Total return | **+37.2%** | +1,077.0% |
+| CAGR | **+4.8%** | +44.1% |
+| Max drawdown | **−25.6%** | −76.6% |
+| Sharpe ratio (annualised, rf = 0) | **0.47** | 0.91 |
+| Sortino ratio | **0.64** | n/a |
+| Calmar ratio (CAGR / Max DD) | **0.19** | 0.58 |
+| Recovery factor (Net profit / Max DD $) | **1.06** | n/a |
+| Time in market | **75.4%** | 100% |
 
 ### 4.2 Trade statistics
 
 | KPI | Value | What it means |
 |---|---:|---|
-| Total cycles | 295 (134 W / 161 L) | ~44 trades per year |
-| Win rate | 45.4% | Fewer than half the cycles are profitable… |
+| Total cycles | 300 (139 W / 161 L) | ~44 trades per year |
+| Win rate | 46.3% | Fewer than half the cycles are profitable… |
 | Payoff ratio (avg win / avg loss) | 1.36 | …but winners are 36% larger than losers |
-| **Profit factor** | **1.13** | Gross profit / gross loss. Above 1 means a positive edge, but a thin one |
-| Expectancy | +143.9 USDT per cycle (+0.16% of equity) | Average net result per trade |
-| Average win / average loss | +2,700 / −1,984 | |
-| Largest win / largest loss | +23,599 / −4,716 | The trailing leg captures outliers. Losses stay capped by the ATR stop |
-| Max winning / losing streak | 5 / 8 cycles | 8 losses in a row at 3% risk ≈ 22% drawdown, a realistic worst case to plan for |
-| Average holding period | 6.1 days | |
-| Total fees paid | 34,410 USDT (34.4% of starting capital) | |
+| **Profit factor** | **1.18** | Gross profit / gross loss after all costs. A positive but thin edge |
+| Expectancy | +123.9 USDT per cycle (+0.12% of equity) | Average net result per trade |
+| Average win / average loss | +1,784 / −1,309 | |
+| Largest win / largest loss | +14,387 / −2,754 | The runner leg captures outliers, while the ATR stop caps losses |
+| Max winning / losing streak | 6 / 7 cycles | |
+| Average holding period | 6.2 days | |
+| Entries filled as maker | 99.0% | The limit at the open is almost always traded through within an hour |
 
-### 4.3 Long vs. short
+### 4.3 Where the costs go
+
+| | USDT | % of gross P&L |
+|---|---:|---:|
+| Gross P&L before costs | **64,273** | 100% |
+| − Exchange fees | 17,380 | 27.0% |
+| − Slippage | 6,957 | 10.8% |
+| − Margin interest (all on shorts) | 2,779 | 4.3% |
+| **= Net P&L** | **37,158** | **57.8%** |
+
+### 4.4 Cost scenarios: how much each assumption matters
+
+| Scenario | Return | CAGR | Sharpe | Max DD | PF | Total costs |
+|---|---:|---:|---:|---:|---:|---:|
+| No costs (daily bars) | +69.4% | +8.1% | 0.75 | −22.1% | 1.31 | 0 |
+| Fees only (0.10%), daily bars (≈ v1 model) | +38.1% | +4.9% | 0.48 | −25.0% | 1.18 | 23,599 |
+| Base-case costs, daily bars only | +40.1% | +5.1% | 0.50 | −24.8% | 1.19 | 22,594 |
+| VIP 0 without BNB (0.10% fees), all costs | +30.3% | +4.0% | 0.40 | −26.3% | 1.14 | 32,093 |
+| **Base case: 0.075% fees, all costs, intraday** | **+37.2%** | **+4.8%** | **0.47** | **−25.6%** | **1.18** | **27,116** |
+| Base case with market-order entries | +39.3% | +5.0% | 0.49 | −25.8% | 1.18 | 31,937 |
+| Base case, 2× slippage and 2× borrow rates | +25.5% | +3.4% | 0.35 | −26.8% | 1.12 | 35,081 |
+
+### 4.5 Long vs. short, and entry types
 
 | Side | Cycles | Net P&L | Win rate |
 |---|---:|---:|---:|
-| Long | 150 | **+68,930** | 48% |
-| Short | 145 | **−26,475** | 43% |
+| Long | 153 | **+55,212** | 51% |
+| Short | 147 | **−18,054** | 41% |
 
-### 4.4 Year-by-year
+| Entry type | Cycles | Net P&L | Win rate |
+|---|---:|---:|---:|
+| Cross (primary) | 114 | +542 | 43% |
+| Volume refresh (secondary) | 123 | +16,048 | 53% |
+| Reverse re-entry | 63 | +20,568 | 40% |
+
+### 4.6 Where the P&L comes from (by exit, leg level)
+
+| Exit | Legs | P&L |
+|---|---:|---:|
+| Leg 1 take-profit | 139 | **+99,728** |
+| Leg 2 trailing / breakeven stop | 143 | **+106,480** |
+| Reverse-signal close | 243 | **−81,057** |
+| Initial stop (both legs) | 54 | −62,508 |
+| Leg 1 forced close (alongside leg 2's trailing stop) | 20 | −17,310 |
+
+*Leg-level P&L is after exit fees, slippage and interest, but before entry fees.*
+
+### 4.7 Year by year
 
 | Year | Strategy | Buy & Hold | Max DD within year | Cycles |
 |---|---:|---:|---:|---:|
-| 2020 | −1.2% | +301.7% | −13.2% | 44 |
-| 2021 | +2.2% | +59.8% | −12.5% | 42 |
-| **2022** | **+17.8%** | **−64.2%** | −9.4% | 35 |
-| 2023 | −8.1% | +155.6% | −30.7% | 51 |
-| 2024 | +1.8% | +121.3% | −16.1% | 44 |
-| 2025 | −0.6% | −6.3% | −11.6% | 47 |
-| 2026 (to 3 Oct) | +28.7% | −3.3% | −10.6% | 32 |
+| 2020 | +2.5% | +302.0% | −10.2% | 46 |
+| 2021 | −0.6% | +59.8% | −8.0% | 43 |
+| **2022** | **+12.2%** | **−64.2%** | −6.2% | 35 |
+| 2023 | −6.3% | +155.6% | −21.6% | 52 |
+| 2024 | +5.1% | +121.3% | −9.1% | 44 |
+| 2025 | +1.7% | −6.3% | −5.6% | 47 |
+| 2026 (to 3 Oct) | +19.9% | −3.3% | −6.8% | 33 |
 
-### 4.5 Where the P&L comes from
+### 4.8 Same parameters on other assets (1 Jan 2024 → Oct 2026, daily-bar fills, base-case costs)
 
-**By exit type** (leg-level P&L, after exit fees, before entry fees):
-
-| Exit | Count | P&L |
-|---|---:|---:|
-| Leg 1 take-profit | 134 | **+144,298** |
-| Leg 2 trailing / breakeven stop | 160 | **+91,113** |
-| Reverse-signal close | 251 | **−104,526** |
-| Leg 1 initial stop-loss | 37 | −64,810 |
-| Forced close (leg 1 with leg 2) | 7 | −7,214 |
-
-**By entry type** (net cycle P&L):
-
-| Entry | Cycles | Net P&L | Win rate |
-|---|---:|---:|---:|
-| Cross (primary) | 109 | +1,193 | 41% |
-| Volume refresh (secondary) | 119 | +15,647 | 52% |
-| Reverse re-entry | 67 | +25,616 | 40% |
-
-### 4.6 Robustness checks
-
-**Fee sensitivity (BTC, 2020 → 2026):**
-
-| Fee per side | Total return | CAGR | Sharpe | Max DD | Profit factor |
-|---|---:|---:|---:|---:|---:|
-| 0.00% | +93.2% | 10.2% | 0.66 | −32.0% | 1.27 |
-| 0.05% | +65.9% | 7.8% | 0.53 | −33.9% | 1.20 |
-| **0.10% (base case)** | **+42.5%** | **5.4%** | **0.39** | **−36.9%** | **1.13** |
-
-**Same parameters on other assets (1 Jan 2024 → Oct 2026):**
-
-| Asset | Return | Max DD | Sharpe | Profit factor | Buy & Hold return | Buy & Hold Max DD |
+| Asset | Return | Max DD | Sharpe | Profit factor | Buy & Hold | Buy & Hold Max DD |
 |---|---:|---:|---:|---:|---:|---:|
-| BTC/USDT | +33.4% | −24.1% | 0.73 | 1.32 | +91.8% | −53.0% |
-| SOL/USDT | +14.9% | −11.8% | 0.41 | 1.15 | +7.7% | −76.3% |
-| BNB/USDT | −1.7% | −21.9% | 0.04 | 0.99 | +146.2% | −58.2% |
-| ETH/USDT | −19.8% | −33.3% | −0.38 | 0.85 | +15.1% | −67.6% |
+| BTC/USDT | +26.0% | −16.1% | 0.83 | 1.37 | +92.1% | −53.0% |
+| SOL/USDT | +4.0% | −9.2% | 0.19 | 1.06 | +7.7% | −76.3% |
+| BNB/USDT | −0.8% | −15.0% | 0.02 | 0.99 | +146.2% | −58.2% |
+| ETH/USDT | −10.8% | −21.3% | −0.31 | 0.88 | +15.1% | −67.6% |
 
 ---
 
 ## 5. Monte Carlo risk analysis
 
-The backtest shows **one** historical ordering of 295 trades. Had the same trades happened in a different order, or had slightly different trades occurred, the drawdown could have been much better or much worse. A single backtest drawdown is therefore a poor estimate of the risk you would actually face.
+The backtest shows **one** historical ordering of 299 closed trades. A different ordering of the same kind of trades could produce a very different drawdown. A single backtest drawdown is therefore a poor estimate of the risk you would actually face.
 
 ### Method
-1. Take each closed cycle's net return as a **% of equity at entry** (294 closed cycles, after fees).
-2. **Bootstrap**: draw 294 trades at random *with replacement* to build a synthetic trade sequence, compounding equity trade by trade.
-3. Repeat **10,000 times** (fixed seed, so it's reproducible) and measure the final return, maximum drawdown and longest losing streak of every path.
-4. **Risk of ruin** is defined as the probability that equity ever falls **50% below its running peak**. That is the point where most traders or risk desks would shut the strategy down.
-5. Repeat the whole simulation with returns rescaled to **1–5% risk per trade** to see how position sizing drives ruin risk.
+1. Take each closed cycle's net return as a **% of equity at entry** (after all costs).
+2. **Bootstrap:** draw 299 trades at random *with replacement* to build a synthetic trade history, compounding equity trade by trade.
+3. Repeat **10,000 times** (fixed seed, so it's reproducible) and record each path's final return, maximum drawdown and longest losing streak.
+4. **Risk of ruin** is the probability that equity ever falls **50% below its running peak**.
+5. Repeat with returns rescaled to **1–5% risk per trade** to see how position sizing drives ruin risk.
 
-![Monte Carlo](monte_carlo_BTCUSDT_1d.png)
+![Monte Carlo](results/monte_carlo.png)
 
-### Results at 3% risk per cycle
+### Results at 2% risk per cycle
 
 | Metric | 5th pct | Median | 95th pct | Actual backtest |
 |---|---:|---:|---:|---:|
-| Final return | −35.8% | +38.6% | +220.6% | +40.4% |
-| CAGR | −6.3% | +5.0% | +18.8% | +5.4% |
-| Max drawdown (trade-to-trade) | n/a | 32.6% | **54.4%** | 35.9% |
-| Longest losing streak | n/a | 8 | 13 | 8 |
+| Final return | −20.1% | +34.2% | +136.3% | +35.8% |
+| CAGR | −3.3% | +4.4% | +13.6% | n/a |
+| Max drawdown (trade-to-trade) | n/a | 21.9% | **38.2%** | 24.7% |
+| Longest losing streak | n/a | 8 | 12 | 7 |
 
 | Risk measure | Value |
 |---|---:|
-| Probability of finishing at a loss | **24.7%** |
-| P(max drawdown ≥ 20%) | 93.8% |
-| P(max drawdown ≥ 30%) | 60.0% |
-| P(max drawdown ≥ 40%) | 26.7% |
-| **Risk of ruin (drawdown ≥ 50%)** | **9.0%** |
-| 99th percentile drawdown | 63.3% |
-| Worst simulated drawdown | 75.1% |
+| Probability of finishing at a loss | **17.7%** |
+| P(max drawdown ≥ 20%) | 60.8% |
+| P(max drawdown ≥ 30%) | 18.2% |
+| P(max drawdown ≥ 40%) | 3.7% |
+| **Risk of ruin (drawdown ≥ 50%)** | **0.39%** |
+| 99th percentile / worst drawdown | 46.5% / 65.0% |
 
 ### Risk-per-trade sensitivity
 
-| Risk per cycle | Median return | Median max DD | 95th pct max DD | P(loss) | Risk of ruin (DD ≥ 50%) |
+| Risk per cycle | Median return | Median max DD | 95th pct max DD | P(loss) | Risk of ruin |
 |---:|---:|---:|---:|---:|---:|
-| 1% | +14.5% | 11.9% | 22.2% | 20.2% | **0.0%** |
-| 2% | +27.6% | 22.7% | 40.1% | 22.4% | **0.6%** |
-| **3% (base)** | **+38.6%** | **32.6%** | **54.4%** | **24.7%** | **9.0%** |
-| 4% | +46.8% | 41.5% | 65.7% | 27.1% | **27.0%** |
-| 5% | +52.2% | 49.5% | 74.5% | 29.5% | **48.9%** |
+| 1% | +17.4% | 11.4% | 21.0% | 15.9% | **0.0%** |
+| **2% (base)** | **+34.2%** | **21.9%** | **38.2%** | **17.7%** | **0.4%** |
+| 3% | +49.5% | 31.5% | 52.2% | 19.5% | **6.8%** |
+| 4% | +62.2% | 40.2% | 63.4% | 21.6% | **23.4%** |
+| 5% | +71.8% | 48.1% | 72.4% | 24.2% | **44.7%** |
 
-### What the simulation tells us
-- **The historical drawdown was not bad luck, and not the worst case either.** The actual 35.9% drawdown sits around the 62nd percentile of simulations. It is typical, so you should *plan* for ~33% and *size* for ~54% (the 95th percentile).
-- **About 1 in 4 sequences ends in a loss** over 294 trades. With a profit factor of 1.13 the edge is real but small relative to the trade-to-trade noise, so a losing multi-year stretch is entirely plausible.
-- **3% risk per cycle is too aggressive for this edge.** It carries a ~9% chance of a 50% drawdown. Going from 3% to 5% risk adds only ~14 points of median return but raises ruin risk from 9% to ~49%. That is volatility drag: past a point, bigger bets add far more risk than return.
-- **2% risk is the better trade-off.** It keeps ~70% of the median return (+27.6% vs +38.6%), cuts the median drawdown from 33% to 23%, and drops ruin risk to 0.6%. At 1%, ruin risk effectively disappears.
-- **Expect long losing streaks.** The median worst streak is 8 losses in a row and the 95th percentile is 13. At 3% risk, 13 straight losses is a ~33% drawdown from losing streaks alone. Anyone running this needs to be prepared for that psychologically and in their capital planning.
+**Takeaways:**
+- The historical 24.7% drawdown sits around the **63rd percentile**: typical, not unlucky. Plan for ~22% and size for ~38% (the 95th percentile).
+- **2% risk** keeps ruin risk below 0.5%. At 3% it jumps to ~7%, and at 5% it approaches 45%. Higher risk adds return far more slowly than it adds ruin risk (volatility drag).
+- Roughly **1 in 6 sequences ends at a loss**. The edge is real but small relative to trade-to-trade noise.
 
-> **Caveat:** bootstrapping assumes trades are independent. In reality losses cluster in choppy regimes (e.g. 2023), so real-world drawdown tails are probably *fatter* than shown. Drawdowns are also measured on closed-trade equity, which excludes intra-trade dips.
+> Bootstrapping assumes trades are independent. Real losses cluster in choppy regimes (e.g. 2023), so the true drawdown tail is probably somewhat fatter than shown.
 
 ---
 
-## 6. Interpretation
+## 6. Parameter robustness and walk-forward optimisation
 
-**1. There is an edge, but it is thin.** A profit factor of 1.13 and expectancy of +0.16% per trade are positive over 295 trades. The margin of safety is small, though. The strategy wins less than half the time and relies on a payoff ratio of 1.36 to come out ahead. That is the classic trend-following profile.
+Any single parameter set (Kijun 14, SL 1.5, TP 1.0, Trail 1.5) might just be lucky, and simply picking the best set over the full history is curve-fitting. Two tests address this:
 
-**2. Fees are the single biggest cost.** The strategy paid **34.4k USDT in fees** against **42.5k of net profit**, so fees ate roughly **45% of the gross edge**. Removing fees more than doubles the return (+93%) and lifts the profit factor to 1.27. With ~44 two-leg trades a year on daily bars, execution cost matters more than any parameter tweak. In practice this argues for maker (limit) orders, a VIP fee tier, or fewer and higher-conviction trades.
+### 6.1 Sensitivity grid: is the edge a parameter fluke?
 
-**3. It does not beat buy & hold BTC on return, and it isn't designed to.** BTC rose ~11x over the period. A strategy that is out of the market ~27% of the time, short in about half of its trades and risking 3% per trade will lag that. The fairer comparison is risk:
-- Max drawdown is **less than half** of buy & hold (−36.9% vs −76.6%).
-- In the **2022 bear market** the strategy made **+17.8%** while BTC lost **−64.2%**. In 2026 YTD it is up **+28.7%** while BTC is down.
+All **384 combinations** of Kijun period {10, 14, 20, 26, 34, 50} × stop {1.0, 1.5, 2.0, 2.5} × TP1 {0.75, 1.0, 1.5, 2.0} × trail {1.0, 1.5, 2.0, 3.0} ATR were backtested with the full cost model.
 
-This is the profile of a **diversifier or crisis-alpha sleeve**, not a replacement for a long BTC position. Its returns are lowly correlated with the underlying in exactly the periods when that matters most.
+![Parameter heatmap](results/parameter_heatmap.png)
 
-**4. The split-position design works as intended.** The two profit engines are leg 1's quick ATR target (+144k) and leg 2's trailing runner (+91k). The runner produced the largest single win (+23.6k) while the largest loss was capped at −4.7k. Moving to breakeven after TP1 turns many cycles into risk-free trades.
+| Finding | Value |
+|---|---:|
+| Parameter sets with a positive return after costs | **384 / 384 (100%)** |
+| Parameter sets with Sharpe > 0.5 | 67% |
+| Median Sharpe / median return across all sets | 0.59 / +46.3% |
+| Baseline (Kijun 14) Sharpe and rank | 0.47, rank 277 of 384 |
+| Best full-period set (in-sample, optimistic) | Kijun 34, SL 2.5, TP 1.0, Trail 3.0: Sharpe 1.19, max DD −8.3% |
 
-**5. The main leak is the Kijun-sen reverse exit in choppy markets.** Reverse-signal closes cost **−104.5k**, more than the initial stop-losses. A 14-period Kijun flips often when the market ranges. Each flip closes a position, often at a small loss, and frequently re-enters the other way. 2023 is the clearest example: BTC ground higher in a choppy range, the strategy took 51 trades, and it suffered its deepest drawdown (−30.7% within the year).
+**Median Sharpe by parameter value** (each value is averaged across all other parameters):
 
-**6. Shorts lose money over the full sample.** Longs made +68.9k and shorts lost −26.5k. Shorting an asset with a strong long-term upward drift is a headwind. Shorts did help in 2022, though, so removing them entirely would trade bear-market protection for higher returns. A regime filter is the better fix (see Next steps).
+| Kijun | 10 | 14 | 20 | 26 | **34** | **50** |
+|---|---:|---:|---:|---:|---:|---:|
+| Median Sharpe | 0.58 | 0.48 | 0.43 | 0.49 | **0.94** | **0.85** |
 
-**7. The parameters don't generalise well across assets.** The setup works on BTC and SOL but not on ETH or BNB with identical parameters. Together with the 2025–26 window looking much better (+27.7%, Sharpe 0.95) than 2023–24, this is a warning against cherry-picking a period. Any optimisation should be validated **out-of-sample** with walk-forward testing.
+| Trail (× ATR) | 1.0 | 1.5 | 2.0 | **3.0** |
+|---|---:|---:|---:|---:|
+| Median Sharpe | 0.44 | 0.55 | 0.63 | **0.66** |
 
-**8. Position sizing matters as much as the signal.** The Monte Carlo analysis shows that the same trades can be a reasonable strategy at 1–2% risk or a dangerous one at 4–5%. Sizing should come from the drawdown you can tolerate (the 95th percentile), not from the single historical backtest.
+The result is a **broad plateau, not a spike**. Every combination is profitable, and slower baselines (Kijun 34–50) with wider trailing stops are consistently better. That fits the diagnosis in section 7: a fast Kijun gets whipsawed by reverse signals.
 
-**Bottom line:** the strategy has a small, positive, fee-sensitive edge on BTC. It offers meaningful drawdown protection and bear-market performance, but it would need lower execution costs, a filter for ranging markets and **lower risk per trade (≈2%)**, based on the Monte Carlo ruin analysis, before it could be considered for live capital.
+### 6.2 Walk-forward optimisation: does optimising actually help on unseen data?
+
+**Method:** optimise on **24 months**, then trade the **next 6 months** with the chosen parameters on data the optimiser never saw. Roll forward 6 months and repeat. That gives 10 out-of-sample windows from Jan 2022 to Oct 2026, stitched into one equity curve. The selection metric is in-sample Sharpe, with a minimum of 20 trades. Three selection rules were compared:
+
+- **Best single:** the highest in-sample Sharpe.
+- **Robust plateau:** the highest *average* Sharpe of a set and all its grid neighbours, which avoids isolated spikes.
+- **Top-5 ensemble:** capital split equally across the 5 best sets, so **multiple parameter sets trade at once**.
+
+![Walk-forward](results/walk_forward.png)
+
+| Out-of-sample, Jan 2022 → Oct 2026 | Return | CAGR | Sharpe | Max DD | Calmar |
+|---|---:|---:|---:|---:|---:|
+| Fixed baseline parameters (no optimisation) | +34.7% | +6.5% | 0.62 | −25.6% | 0.25 |
+| Walk-forward: best single | **+42.3%** | **+7.7%** | **0.63** | −20.3% | **0.38** |
+| Walk-forward: robust plateau | +10.8% | +2.2% | 0.23 | −22.2% | 0.10 |
+| **Walk-forward: top-5 ensemble** | +33.0% | +6.2% | 0.60 | **−16.3%** | **0.38** |
+| Buy & hold BTC | +83.4% | +13.6% | 0.50 | −66.9% | 0.20 |
+
+**Overfitting check:** the "best" parameters averaged an **in-sample Sharpe of 1.61** but only **0.68 out-of-sample**, a ~58% decay. Every window's chosen parameters and results are in `results/walk_forward_windows.csv`.
 
 ---
 
-## 7. Limitations
+## 7. Interpretation
 
-- **No slippage or funding modelled**  Spot BTC/USDT is very liquid, but perpetual futures would add funding rate costs and Margin trading would add borrowing rate fees.
-- **Shorting spot** assumes borrow is available at no cost. Realistically, the short side would run on perpetual futures OR margin trading feature on spot.
-- **Single parameter set**, no optimisation. That avoids overfitting, but the parameters are not proven optimal either.
-- **Monte Carlo assumes independent trades.** Regime-driven loss clustering means the true drawdown tail is likely fatter than simulated.
-- **Survivorship.** Tested on large-cap, surviving assets only.
+**1. A real edge that survives realistic costs, but a thin one.** After fees, slippage and borrowing costs, the profit factor is 1.18 and expectancy +0.12% per trade over 300 trades. All 384 parameter combinations are profitable, so the edge is not a parameter fluke. Its size is modest, though.
+
+**2. Execution costs consume 42% of the gross edge.** Fees are the biggest item (27% of gross P&L), followed by slippage (11%) and margin interest (4%). Moving from VIP 0 without BNB to paying in BNB adds ~7 percentage points of return. Doubling slippage and borrow rates removes ~12. For a ~44-trades-a-year system, **execution quality matters as much as the signal.**
+
+**3. Maker entries don't pay at the retail fee tier.** Limit entries filled 99% of the time, yet **market entries returned slightly more** (+39.3% vs +37.2%). At VIP 0, maker and taker fees are identical, so a limit order saves nothing on fees. It does suffer **adverse selection**: it fills exactly when price moves against you, and misses trades that run away. Maker execution only becomes worthwhile at VIP tiers where maker fees are below taker fees.
+
+**4. Daily-bar backtests flatter this strategy slightly.** With the same costs, daily-bar fills return +40.1% and intraday fills +37.2%. On daily bars a stop fills exactly at its level. On 5-minute bars, stops are hit during fast moves and pay realistic slippage.
+
+**5. It's a risk-reducer, not a return-maximiser.** The strategy lags buy & hold BTC on return (+37% vs +1,077%), but with **a third of the drawdown** (−25.6% vs −76.6%). It made **+12.2% in 2022** while BTC fell 64%. It fits as a **diversifying, crisis-alpha sleeve**, not a replacement for a long BTC position.
+
+**6. The main leak is the Kijun reverse exit in choppy markets.** Reverse-signal closes cost −81k, more than the initial stops (−63k). 2023 is the clearest example: a choppy, rising market produced 52 trades and the deepest drawdown (−21.6%). The sensitivity grid confirms this independently. Slower Kijun periods (34–50) flip less often and nearly double the median Sharpe.
+
+**7. Shorts still lose money, and pay to borrow.** Longs made +55k and shorts lost −18k, including all 2.8k of margin interest. Shorting an asset with a strong long-term upward drift is a structural headwind, although shorts helped in 2022.
+
+**8. Optimisation overfits. Diversifying across parameters is what helps.** In-sample Sharpe fell from 1.61 to 0.68 out-of-sample. The re-optimised "best single" set reached a similar out-of-sample Sharpe to simply keeping the fixed parameters (0.63 vs 0.62). It beat the baseline in only 5 of 10 windows, and its higher return comes mostly from a single window (2023 H2: +11.8% vs −10.9%). The "robust plateau" rule did worst, because the regions that looked stable in-sample (Kijun 50 with tight targets) were not the ones that worked next. The **top-5 ensemble** matched the baseline's Sharpe while cutting the max drawdown from 25.6% to **16.3%**. Spreading capital across several good parameter sets is a more reliable way to handle parameter uncertainty than trying to find the single best one.
+
+**9. Sizing: 2% risk per trade.** The Monte Carlo analysis puts the risk of a 50% drawdown at 0.4% at 2% risk, versus ~7% at 3% and ~45% at 5%.
+
+**Bottom line:** after realistic costs, intraday execution and out-of-sample testing, the strategy keeps a **small, robust, positive edge on BTC**, with strong drawdown protection versus buy & hold. Before it could be considered for live capital, it would need:
+- lower execution costs (a higher VIP tier, so that maker orders actually save fees)
+- a filter for ranging markets, or slower baselines
+- trading a **parameter ensemble** at **≈2% risk** rather than one "optimal" set
+
+---
+
+## 8. Limitations
+
+- **Slippage is modelled, not measured.** There is no historical order-book depth, so slippage is a volatility-based model. Maker fills require price to trade through the level, but queue position is not simulated.
+- **Borrow rates are fixed.** Binance margin rates are dynamic and can spike in stress periods, and borrow availability is assumed.
+- **Within a 5-minute bar**, a stop is still assumed to hit before a target (conservative).
+- **Walk-forward evaluation** slices full-period runs, so a trade that spans a window boundary is split across windows. The parameter grid is limited to 4 dimensions (volume settings fixed).
+- **Monte Carlo** assumes independent trades, so regime clustering makes the real tail fatter.
+- **Single asset with intraday fills.** The other assets were tested on daily bars only, and only large-cap, surviving coins were tested (survivorship).
 - Past performance does not guarantee future results. This is a research project, not investment advice.
 
 ---
 
-## 8. How to run
+## 9. Project structure and how to run
+
+```
+python-algo-trading-backtest/
+├── backtester/
+│   ├── config.py         # all settings: market, strategy params, cost model, Monte Carlo, optimisation grid
+│   ├── data.py           # Binance REST download + local CSV cache + per-day intraday book
+│   ├── engine.py         # event-driven engine: daily signals, 5-minute execution, fees, slippage, interest
+│   ├── metrics.py        # KPIs and console report
+│   ├── monte_carlo.py    # bootstrap simulation, drawdown distribution, risk of ruin
+│   ├── optimize.py       # parameter grid + walk-forward optimisation
+│   └── plots.py          # static PNG charts + interactive Plotly chart
+├── results/              # charts and CSV outputs (used in this README)
+├── run_backtest.py       # backtest + cost scenarios + Monte Carlo
+├── run_optimization.py   # sensitivity grid + walk-forward (~1 minute)
+└── requirements.txt
+```
 
 ```bash
 git clone https://github.com/AliAgha-Analytics/python-algo-trading-backtest.git
 cd python-algo-trading-backtest
 pip install -r requirements.txt
-python kijun_volume_backtest.py
+python run_backtest.py
+python run_optimization.py
 ```
 
-All parameters are in the `CONFIG` block at the top of the script: symbol, timeframe, dates, risk %, ATR multiples, indicator periods, fees and Monte Carlo settings (`MC_SIMULATIONS`, `MC_RUIN_DD_PCT`, `MC_RISK_LEVELS`). Set `END_DATE = None` to run up to the latest candle.
+The first run downloads ~710k five-minute candles from Binance's public API, which takes about 5–10 minutes. After that the data is cached locally in `data_cache/`. All settings are in `backtester/config.py`.
 
-**Outputs:**
-
-| File | Content |
+| Output (`results/`) | Content |
 |---|---|
-| Console | Full KPI report (including the buy & hold benchmark) and Monte Carlo risk report |
-| `cycles_<SYMBOL>_<TF>.csv` | One row per trade cycle: entry, side, size, fees, net P&L, holding time, exit reason |
-| `events_<SYMBOL>_<TF>.csv` | Every individual entry and leg exit |
-| `chart_<SYMBOL>_<TF>.html` | Interactive Plotly chart: candles, Kijun-sen, entry/exit markers, Normalized Volume and equity curve |
-| `results_<SYMBOL>_<TF>.png` | Static summary chart (used in this README) |
-| `monte_carlo_<SYMBOL>_<TF>.png` | Monte Carlo fan chart and drawdown distribution |
+| `results.png` | Price, entries, equity vs buy & hold, drawdown |
+| `monte_carlo.png` | Monte Carlo fan chart and drawdown distribution |
+| `parameter_heatmap.png` | Sharpe ratio heatmaps across parameter pairs |
+| `walk_forward.png` | Out-of-sample equity of the walk-forward variants |
+| `cycles.csv` | One row per trade: entry, side, size, maker/taker, gross P&L, fees, slippage, interest, net P&L |
+| `parameter_grid.csv` | KPIs for all 384 parameter sets |
+| `walk_forward_windows.csv` / `walk_forward_summary.csv` | Chosen parameters and results per window, and overall |
+| `chart.html` | Interactive chart (generated locally, not committed) |
 
 ---
 
-## 9. Next steps
+## 10. Changes from v1
 
-- [ ] **Regime filter**: only take longs above the 200-day MA and shorts below it, or skip trades when ADX < 20, to cut whipsaw reverse exits.
-- [ ] **Walk-forward optimisation** of Kijun, ATR and volume parameters with out-of-sample validation.
-- [ ] **Block bootstrap** Monte Carlo that resamples runs of consecutive trades, to capture regime-driven loss clustering.
-- [ ] **Maker-fee execution** and slippage modelling on intraday data.
-- [ ] **Perpetual futures version** including funding rates.
-- [ ] **Portfolio test** across several assets with volatility-based allocation.
+| Area | v1 | v2 (this version) |
+|---|---|---|
+| Execution | Daily bars, worst-case intrabar ordering | **5-minute bars** for every fill |
+| Fees | Flat 0.10% per side | **Maker/taker by order type** (0.075%, VIP 0 + BNB) |
+| Slippage | None | **1 bp + 10% of the fill bar's range** on market/stop orders |
+| Financing | None | **Margin interest** on borrowed BTC (shorts) and USDT (leverage > 1×) |
+| Leverage | Uncapped | **3× cross-margin cap** |
+| Risk per cycle | 3% | **2%** (from the Monte Carlo ruin analysis) |
+| Parameters | Single fixed set | **384-set sensitivity grid + walk-forward optimisation + ensemble** |
+| Code | Single script | **Modular package** |
+| Bug fixes | — | Stops are now checked on the bar of a reverse re-entry. The trailing stop updates at the new bar's open, as in the MT5 EA (v1 lagged by one bar). Indicators get 120 days of warm-up history |
 
 ---
 
-**Tools:** Python · pandas · NumPy · Plotly · Matplotlib · Binance REST API
+## 11. Next steps
+
+- [x] Monte Carlo resampling of the trade sequence (drawdown distribution, risk of ruin)
+- [x] Realistic fees, slippage and margin interest with intraday execution
+- [x] Parameter sensitivity grid and walk-forward optimisation
+- [ ] **Regime filter** (e.g. ADX or 200-day MA) to avoid whipsaw reverse exits in ranging markets
+- [ ] **Block bootstrap** Monte Carlo to capture loss clustering
+- [ ] **Order-book-based slippage** using historical depth snapshots
+- [ ] **Multi-asset portfolio** with volatility-based allocation
+
+---
+
+**Tools:** Python · pandas · NumPy · Matplotlib · Plotly · Binance REST API
 **Author:** Ali Agha · [LinkedIn](https://www.linkedin.com/in/ali-agha-a068551b5) · [GitHub](https://github.com/AliAgha-Analytics)
