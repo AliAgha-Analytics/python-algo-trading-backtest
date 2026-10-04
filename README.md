@@ -3,7 +3,7 @@
 An event-driven Python backtest of a **split-position trend-following strategy** on Binance BTC/USDT daily data.
 The strategy uses the Ichimoku **Kijun-sen** as the trend baseline and **Normalized Volume** as confirmation.
 
-It is a Python port of a MetaTrader 5 Expert Advisor I built. The rules, position management and edge cases match the EA one-to-one. I then added crypto exchange fees, risk-based sizing and a full KPI report on top.
+It is a Python port of a MetaTrader 5 Expert Advisor I built. The rules, position management and edge cases match the EA one-to-one. I then added crypto exchange fees, risk-based sizing, a full KPI report and a **Monte Carlo risk analysis** (drawdown distribution and risk of ruin) on top.
 
 ![Backtest results](results_BTCUSDT_1d.png)
 
@@ -14,10 +14,11 @@ It is a Python port of a MetaTrader 5 Expert Advisor I built. The rules, positio
 2. [Position sizing and trade management](#2-position-sizing-and-trade-management)
 3. [Backtest engine and assumptions](#3-backtest-engine-and-assumptions)
 4. [Results](#4-results)
-5. [Interpretation](#5-interpretation)
-6. [Limitations](#6-limitations)
-7. [How to run](#7-how-to-run)
-8. [Next steps](#8-next-steps)
+5. [Monte Carlo risk analysis](#5-monte-carlo-risk-analysis)
+6. [Interpretation](#6-interpretation)
+7. [Limitations](#7-limitations)
+8. [How to run](#8-how-to-run)
+9. [Next steps](#9-next-steps)
 
 ---
 
@@ -173,13 +174,66 @@ Fill model (conservative by design):
 
 ---
 
-## 5. Interpretation
+## 5. Monte Carlo risk analysis
+
+The backtest shows **one** historical ordering of 295 trades. Had the same trades happened in a different order, or had slightly different trades occurred, the drawdown could have been much better or much worse. A single backtest drawdown is therefore a poor estimate of the risk you would actually face.
+
+### Method
+1. Take each closed cycle's net return as a **% of equity at entry** (294 closed cycles, after fees).
+2. **Bootstrap**: draw 294 trades at random *with replacement* to build a synthetic trade sequence, compounding equity trade by trade.
+3. Repeat **10,000 times** (fixed seed, so it's reproducible) and measure the final return, maximum drawdown and longest losing streak of every path.
+4. **Risk of ruin** is defined as the probability that equity ever falls **50% below its running peak**. That is the point where most traders or risk desks would shut the strategy down.
+5. Repeat the whole simulation with returns rescaled to **1–5% risk per trade** to see how position sizing drives ruin risk.
+
+![Monte Carlo](monte_carlo_BTCUSDT_1d.png)
+
+### Results at 3% risk per cycle
+
+| Metric | 5th pct | Median | 95th pct | Actual backtest |
+|---|---:|---:|---:|---:|
+| Final return | −35.8% | +38.6% | +220.6% | +40.4% |
+| CAGR | −6.3% | +5.0% | +18.8% | +5.4% |
+| Max drawdown (trade-to-trade) | n/a | 32.6% | **54.4%** | 35.9% |
+| Longest losing streak | n/a | 8 | 13 | 8 |
+
+| Risk measure | Value |
+|---|---:|
+| Probability of finishing at a loss | **24.7%** |
+| P(max drawdown ≥ 20%) | 93.8% |
+| P(max drawdown ≥ 30%) | 60.0% |
+| P(max drawdown ≥ 40%) | 26.7% |
+| **Risk of ruin (drawdown ≥ 50%)** | **9.0%** |
+| 99th percentile drawdown | 63.3% |
+| Worst simulated drawdown | 75.1% |
+
+### Risk-per-trade sensitivity
+
+| Risk per cycle | Median return | Median max DD | 95th pct max DD | P(loss) | Risk of ruin (DD ≥ 50%) |
+|---:|---:|---:|---:|---:|---:|
+| 1% | +14.5% | 11.9% | 22.2% | 20.2% | **0.0%** |
+| 2% | +27.6% | 22.7% | 40.1% | 22.4% | **0.6%** |
+| **3% (base)** | **+38.6%** | **32.6%** | **54.4%** | **24.7%** | **9.0%** |
+| 4% | +46.8% | 41.5% | 65.7% | 27.1% | **27.0%** |
+| 5% | +52.2% | 49.5% | 74.5% | 29.5% | **48.9%** |
+
+### What the simulation tells us
+- **The historical drawdown was not bad luck, and not the worst case either.** The actual 35.9% drawdown sits around the 62nd percentile of simulations. It is typical, so you should *plan* for ~33% and *size* for ~54% (the 95th percentile).
+- **About 1 in 4 sequences ends in a loss** over 294 trades. With a profit factor of 1.13 the edge is real but small relative to the trade-to-trade noise, so a losing multi-year stretch is entirely plausible.
+- **3% risk per cycle is too aggressive for this edge.** It carries a ~9% chance of a 50% drawdown. Going from 3% to 5% risk adds only ~14 points of median return but raises ruin risk from 9% to ~49%. That is volatility drag: past a point, bigger bets add far more risk than return.
+- **2% risk is the better trade-off.** It keeps ~70% of the median return (+27.6% vs +38.6%), cuts the median drawdown from 33% to 23%, and drops ruin risk to 0.6%. At 1%, ruin risk effectively disappears.
+- **Expect long losing streaks.** The median worst streak is 8 losses in a row and the 95th percentile is 13. At 3% risk, 13 straight losses is a ~33% drawdown from losing streaks alone. Anyone running this needs to be prepared for that psychologically and in their capital planning.
+
+> **Caveat:** bootstrapping assumes trades are independent. In reality losses cluster in choppy regimes (e.g. 2023), so real-world drawdown tails are probably *fatter* than shown. Drawdowns are also measured on closed-trade equity, which excludes intra-trade dips.
+
+---
+
+## 6. Interpretation
 
 **1. There is an edge, but it is thin.** A profit factor of 1.13 and expectancy of +0.16% per trade are positive over 295 trades. The margin of safety is small, though. The strategy wins less than half the time and relies on a payoff ratio of 1.36 to come out ahead. That is the classic trend-following profile.
 
 **2. Fees are the single biggest cost.** The strategy paid **34.4k USDT in fees** against **42.5k of net profit**, so fees ate roughly **45% of the gross edge**. Removing fees more than doubles the return (+93%) and lifts the profit factor to 1.27. With ~44 two-leg trades a year on daily bars, execution cost matters more than any parameter tweak. In practice this argues for maker (limit) orders, a VIP fee tier, or fewer and higher-conviction trades.
 
-**3. It does not beat buy & hold BTC on return, and it isn't designed to.** BTC rose ~11x over the period. Any strategy that is flat or short ~27% of the time and risks 3% per trade will lag that. The fairer comparison is risk:
+**3. It does not beat buy & hold BTC on return, and it isn't designed to.** BTC rose ~11x over the period. A strategy that is out of the market ~27% of the time, short in about half of its trades and risking 3% per trade will lag that. The fairer comparison is risk:
 - Max drawdown is **less than half** of buy & hold (−36.9% vs −76.6%).
 - In the **2022 bear market** the strategy made **+17.8%** while BTC lost **−64.2%**. In 2026 YTD it is up **+28.7%** while BTC is down.
 
@@ -193,22 +247,25 @@ This is the profile of a **diversifier or crisis-alpha sleeve**, not a replaceme
 
 **7. The parameters don't generalise well across assets.** The setup works on BTC and SOL but not on ETH or BNB with identical parameters. Together with the 2025–26 window looking much better (+27.7%, Sharpe 0.95) than 2023–24, this is a warning against cherry-picking a period. Any optimisation should be validated **out-of-sample** with walk-forward testing.
 
-**Bottom line:** the strategy has a small, positive, fee-sensitive edge on BTC. It offers meaningful drawdown protection and bear-market performance, but it would need lower execution costs and a filter for ranging markets before it could be considered for live capital.
+**8. Position sizing matters as much as the signal.** The Monte Carlo analysis shows that the same trades can be a reasonable strategy at 1–2% risk or a dangerous one at 4–5%. Sizing should come from the drawdown you can tolerate (the 95th percentile), not from the single historical backtest.
+
+**Bottom line:** the strategy has a small, positive, fee-sensitive edge on BTC. It offers meaningful drawdown protection and bear-market performance, but it would need lower execution costs, a filter for ranging markets and **lower risk per trade (≈2%)**, based on the Monte Carlo ruin analysis, before it could be considered for live capital.
 
 ---
 
-## 6. Limitations
+## 7. Limitations
 
 - **Daily bars only.** The intra-bar order of high and low is unknown, so the engine assumes the worst case (stop before target). That may understate performance slightly.
 - **No slippage or funding modelled** beyond the taker fee. Spot BTC/USDT is very liquid, but perpetual futures would add funding rate costs.
 - **Shorting spot** assumes borrow is available at no cost. Realistically, the short side would run on perpetual futures.
 - **Single parameter set**, no optimisation. That avoids overfitting, but the parameters are not proven optimal either.
+- **Monte Carlo assumes independent trades.** Regime-driven loss clustering means the true drawdown tail is likely fatter than simulated.
 - **Survivorship.** Tested on large-cap, surviving assets only.
 - Past performance does not guarantee future results. This is a research project, not investment advice.
 
 ---
 
-## 7. How to run
+## 8. How to run
 
 ```bash
 git clone https://github.com/AliAgha-Analytics/python-algo-trading-backtest.git
@@ -217,25 +274,27 @@ pip install -r requirements.txt
 python kijun_volume_backtest.py
 ```
 
-All parameters are in the `CONFIG` block at the top of the script: symbol, timeframe, dates, risk %, ATR multiples, indicator periods and fees. Set `END_DATE = None` to run up to the latest candle.
+All parameters are in the `CONFIG` block at the top of the script: symbol, timeframe, dates, risk %, ATR multiples, indicator periods, fees and Monte Carlo settings (`MC_SIMULATIONS`, `MC_RUIN_DD_PCT`, `MC_RISK_LEVELS`). Set `END_DATE = None` to run up to the latest candle.
 
 **Outputs:**
 
 | File | Content |
 |---|---|
-| Console | Full KPI report, including the buy & hold benchmark |
+| Console | Full KPI report (including the buy & hold benchmark) and Monte Carlo risk report |
 | `cycles_<SYMBOL>_<TF>.csv` | One row per trade cycle: entry, side, size, fees, net P&L, holding time, exit reason |
 | `events_<SYMBOL>_<TF>.csv` | Every individual entry and leg exit |
 | `chart_<SYMBOL>_<TF>.html` | Interactive Plotly chart: candles, Kijun-sen, entry/exit markers, Normalized Volume and equity curve |
 | `results_<SYMBOL>_<TF>.png` | Static summary chart (used in this README) |
+| `monte_carlo_<SYMBOL>_<TF>.png` | Monte Carlo fan chart and drawdown distribution |
 
 ---
 
-## 8. Next steps
+## 9. Next steps
 
 - [ ] **Regime filter**: only take longs above the 200-day MA and shorts below it, or skip trades when ADX < 20, to cut whipsaw reverse exits.
 - [ ] **Walk-forward optimisation** of Kijun, ATR and volume parameters with out-of-sample validation.
-- [ ] **Monte Carlo resampling** of the trade sequence to estimate the distribution of drawdowns and the risk of ruin.
+- [x] **Monte Carlo resampling** of the trade sequence to estimate the distribution of drawdowns and the risk of ruin.
+- [ ] **Block bootstrap** Monte Carlo that resamples runs of consecutive trades, to capture regime-driven loss clustering.
 - [ ] **Maker-fee execution** and slippage modelling on intraday data.
 - [ ] **Perpetual futures version** including funding rates.
 - [ ] **Portfolio test** across several assets with volatility-based allocation.
