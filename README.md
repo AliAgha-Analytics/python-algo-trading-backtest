@@ -357,7 +357,7 @@ python-algo-trading-backtest/
 
 ```bash
 git clone https://github.com/AliAgha-Analytics/python-algo-trading-backtest.git
-cd python-algo-trading-backtest
+cd python-algorithmic-trading-backtest
 pip install -r requirements.txt
 python run_backtest.py
 python run_optimization.py
