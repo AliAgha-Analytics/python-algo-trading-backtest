@@ -387,4 +387,3 @@ The first run downloads ~710k five-minute candles from Binance's public API, whi
 ---
 
 **Tools:** Python · pandas · NumPy · Matplotlib · Plotly · Binance REST API
-**Author:** Ali Agha · [LinkedIn](https://www.linkedin.com/in/ali-agha-a068551b5) · [GitHub](https://github.com/AliAgha-Analytics)
