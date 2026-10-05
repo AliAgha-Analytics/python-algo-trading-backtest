@@ -1,4 +1,4 @@
-# Algorithmic Trading Backtest: Kijun-sen + Normalized Volume (Crypto)
+# Algorithmic Trading Backtest: Kijun-sen + Normalized Volume
 
 An event-driven Python backtesting framework for a **split-position trend-following strategy** on Binance BTC/USDT. It covers:
 
