@@ -22,8 +22,7 @@ The strategy uses the Ichimoku **Kijun-sen** as the trend baseline and **Normali
 7. [Interpretation](#7-interpretation)
 8. [Limitations](#8-limitations)
 9. [Project structure and how to run](#9-project-structure-and-how-to-run)
-10. [Changes from v1](#10-changes-from-v1)
-11. [Next steps](#11-next-steps)
+10. [Next steps](#10-next-steps)
 
 ---
 
